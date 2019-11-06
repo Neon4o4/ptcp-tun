@@ -1,77 +1,103 @@
 import struct
+from typing import Tuple, List
 
-CHUNK_SIZE_FORMAT = '!H'  # unsigned short, 2 bytes, big-endian (network)
-CHUNK_SIZE_SIZE = 2
+'''
+Packet format:
+header (6 bytes)
+    length of data  2B
+    sequence number 4B
+data `length of data` bytes
+'''
+PACKET_HEADER_FORMAT = '!HL'  # unsigned short, 2 bytes, big-endian (network)
+PACKET_HEADER_SIZE = 6
 
 
-class Chunk2StreamBuffer:
+# TODO: verify each new client -> server
+
+class Steam2PacketBuffer:
     def __init__(self):
-        self.chunk_size_remain_bytes = 0
-        self.chunk_size_parts = b''
-        self.chunk_remain_bytes = 0
-        self.unread_bytes = []
+        self.current_seq: int = -1
+        self.header_remain_bytes: int = 0
+        self.incomplete_packet_header: bytes = b''
+        self.incomplete_packet_data: bytes = b''
+        self.packet_remain_bytes: int = 0
+        self.unread_packets: List[Tuple[int, bytes]] = []
 
     def append_raw_data(self, data: bytes):
-        if self.chunk_size_remain_bytes > 0:
-            chunk_size_s, data = data[:self.chunk_size_remain_bytes], data[self.chunk_size_remain_bytes:]
-            self.chunk_size_parts += chunk_size_s
-            self.chunk_size_remain_bytes -= len(chunk_size_s)
-            if self.chunk_size_remain_bytes <= 0:
-                self.chunk_remain_bytes, = struct.unpack(CHUNK_SIZE_FORMAT, self.chunk_size_parts)
-                self.chunk_size_parts = b''
-                self.chunk_size_remain_bytes = 0
+        if self.header_remain_bytes > 0:
+            chunk_size_s, data = data[:self.header_remain_bytes], data[self.header_remain_bytes:]
+            self.incomplete_packet_header += chunk_size_s
+            self.header_remain_bytes -= len(chunk_size_s)
+            if self.header_remain_bytes <= 0:
+                self.packet_remain_bytes, self.current_seq \
+                    = struct.unpack(PACKET_HEADER_FORMAT, self.incomplete_packet_header)
+                self.incomplete_packet_header = b''
+                self.header_remain_bytes = 0
             else:
                 return
 
-        if self.chunk_remain_bytes > 0 and len(data) > 0:
-            last_chunk, data = data[:self.chunk_remain_bytes], data[self.chunk_remain_bytes:]
-            self.unread_bytes.append(last_chunk)
-            self.chunk_remain_bytes -= len(last_chunk)
+        assert (self.header_remain_bytes == 0 and self.incomplete_packet_header == b'')
+
+        if self.packet_remain_bytes > 0 and len(data) > 0:
+            last_packet, data = data[:self.packet_remain_bytes], data[self.packet_remain_bytes:]
+            self.incomplete_packet_data += last_packet
+            self.packet_remain_bytes -= len(last_packet)
+            if self.packet_remain_bytes <= 0:
+                self.unread_packets.append((self.current_seq, self.incomplete_packet_data))
+                self.current_seq = -1
+                self.incomplete_packet_data = b''
         # here, at most 1 of the following holds:
-        #  1. self.chunk_remain_bytes is 0: data in last chunk is read,
-        #     we may still have some (complete or in complete) chunks
-        #  2. self.chunk_remain_bytes is not 0 ( > 0): which means, the original `data` contains less data than
-        #     expected by `self.chunk_remain_bytes`, hence len(data) will be 0 and we do not need to do anything
-        size: int
+        #  1. self.packet_remain_bytes is 0: data in last packet is read,
+        #     we may still have some (complete or in complete) packets
+        #  2. self.packet_remain_bytes is not 0 ( > 0): which means, the original `data` contains less data than
+        #     expected by `self.packet_remain_bytes`, hence len(data) will be 0 and we do not need to do anything
+        packet_data_size: int
         while len(data) > 0:
-            size_s, data = data[:CHUNK_SIZE_SIZE], data[CHUNK_SIZE_SIZE:]
-            if len(size_s) < CHUNK_SIZE_SIZE:
-                self.chunk_size_remain_bytes = CHUNK_SIZE_SIZE - len(size_s)
-                self.chunk_size_parts = size_s
+            # if len(data) > 0, we must have read all data from last packet,
+            #   otherwise len(data) should be 0 because in last `if` we tried to read all remaining data in last packet
+            #   and thus, we also have `self.packet_remain_bytes` is 0, which means clean buffer for header and data
+            assert (
+                    self.packet_remain_bytes == 0 and
+                    self.current_seq == -1 and
+                    self.incomplete_packet_header == b'' and
+                    self.incomplete_packet_data == b''
+            )
+            header_s, data = data[:PACKET_HEADER_SIZE], data[PACKET_HEADER_SIZE:]
+            if len(header_s) < PACKET_HEADER_SIZE:
+                self.header_remain_bytes = PACKET_HEADER_SIZE - len(header_s)
+                self.incomplete_packet_header = header_s
                 return
 
-            size, = struct.unpack(CHUNK_SIZE_FORMAT, size_s)
-            chunk, data = data[:size], data[size:]
-            self.unread_bytes.append(chunk)
-            self.chunk_remain_bytes = size - len(chunk)
+            packet_data_size, seq = struct.unpack(PACKET_HEADER_FORMAT, header_s)
+            packet_data, data = data[:packet_data_size], data[packet_data_size:]
+            if len(packet_data) == packet_data_size:
+                self.unread_packets.append((seq, packet_data))
+            else:
+                # all data read, but there is still data to read for current packet
+                #   keep these data and continue
+                self.current_seq = seq
+                self.incomplete_packet_data = packet_data
+                self.packet_remain_bytes = packet_data_size - len(packet_data)
 
-    def get_ready_size(self):
-        return sum((len(d) for d in self.unread_bytes))
+    def get_first_packet_seq(self) -> int:
+        """
+        get the seq number of the first unread packet
+        :return: seq of first packet, or -1 if no packet is ready
+        """
+        return self.unread_packets[0][0] if self.unread_packets else -1
 
-    def read(self, size: int = -1):
-        if size == 0 or len(self.unread_bytes) == 0:
-            return b''
-        if size < 0:
-            data = b''.join(self.unread_bytes)
-            self.unread_bytes = []
-            return data
-        len_sum = 0
-        idx = 0
-        while idx < len(self.unread_bytes) and len_sum < size:
-            idx += 1
-            len_sum += len(self.unread_bytes[idx])
-        if len_sum <= size:
-            data, self.unread_bytes = self.unread_bytes[:idx], self.unread_bytes[idx:]
-            return b''.join(data)
-        else:
-            data, self.unread_bytes = self.unread_bytes[:idx], self.unread_bytes[idx:]
-            data = b''.join(data)
-            data_rtn, data_keep = data[:size], data[size:]
-            self.unread_bytes.insert(0, data_keep)
-            return data_rtn
+    def num_ready_packet(self) -> int:
+        """
+        :return: the number of packets that are ready to be read
+        """
+        return len(self.unread_packets)
+
+    def read_packet(self, count: int = 1) -> List[Tuple[int, bytes]]:
+        rtn, self.unread_packets = self.unread_packets[:count], self.unread_packets[count:]
+        return rtn
 
 
-class Stream2ChunkBuffer:
+class Packet2StreamBuffer:
     # TODO
     def __init__(self):
         pass
