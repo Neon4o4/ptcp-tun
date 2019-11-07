@@ -98,6 +98,32 @@ class Steam2PacketBuffer:
 
 
 class Packet2StreamBuffer:
-    # TODO
     def __init__(self):
-        pass
+        self.unread_stream_data: List[bytes] = []
+
+    def append_packet(self, seq: int, data: bytes):
+        data_len: int = len(data)
+        packet_header = struct.pack(PACKET_HEADER_FORMAT, data_len, seq)
+        self.unread_stream_data.append(packet_header)
+        self.unread_stream_data.append(data)
+
+    def read_stream_data(self, size: int = -1) -> bytes:
+        if size == 0 or len(self.unread_stream_data) == 0:
+            return b''
+        current_total_len: int = sum((len(d) for d in self.unread_stream_data))
+        if size < 0 or size >= current_total_len:
+            data = b''.join(self.unread_stream_data)
+            self.unread_stream_data = []
+            return data
+        len_sum = 0
+        idx = 0
+        while idx < len(self.unread_stream_data) and len_sum < size:
+            len_sum += len(self.unread_stream_data[idx])
+            idx += 1
+
+        # note that 0 <= size < current_total_len
+        data, self.unread_stream_data = self.unread_stream_data[:idx], self.unread_stream_data[idx:]
+        data = b''.join(data)
+        data_rtn, data_keep = data[:size], data[size:]
+        self.unread_stream_data.insert(0, data_keep)
+        return data_rtn

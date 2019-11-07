@@ -1,7 +1,9 @@
 import unittest
 import random
 import struct
+
 from buffer import Steam2PacketBuffer
+from buffer import Packet2StreamBuffer
 
 
 def _generate_packet(size, seq):
@@ -93,6 +95,30 @@ class Stream2PacketTest(unittest.TestCase):
             self.assertEqual(r_data, data)
         self.assertEqual(s2p.num_ready_packet(), 0)
         self.assertEqual(s2p.read_packet(), [])
+
+
+class Packet2StreamTest(unittest.TestCase):
+    def test_random(self):
+        p2s = Packet2StreamBuffer()
+        sending_packets = []
+        for _ in range(random.randint(0, 100)):
+            size, seq = random.randint(0, 30), random.randint(0, 1000)
+            header, data = _generate_packet(size, seq)
+            sending_packets.append((seq, header, data))
+        expected_stream = b''.join(h + d for _, h, d in sending_packets)
+        for seq, _, data in sending_packets:
+            p2s.append_packet(seq, data)
+
+        sending_stream = b''
+        read_len: int = random.randint(1, 50)
+        chunk: bytes = p2s.read_stream_data(read_len)
+        while len(chunk):
+            sending_stream += chunk
+            read_len: int = random.randint(1, 50)
+            chunk: bytes = p2s.read_stream_data(read_len)
+
+        self.assertEqual(sending_stream, expected_stream)
+        self.assertEqual(p2s.read_stream_data(), b'')
 
 
 if __name__ == '__main__':
