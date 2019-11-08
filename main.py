@@ -19,12 +19,21 @@ For server
 client --incoming--> server --outgoing--> target 
 '''
 
+"""
+application --incoming socket ready (read)--> incoming sending cache
+  --> outgoing socket ready (send via socket)
+
+(server) --outgoing socket ready (read)--> incoming recv cache
+  --> incoming socket ready (reorder and send via socket)
+"""
 
 def client():
     incoming_socks = set()
-    incoming_sending_caches = defaultdict(list)  # incoming socket -> [ (seq, bytes) ]
-    incoming_sending_seq = defaultdict(lambda: 1)  # incoming socket -> last send
+    incoming_sending_caches = defaultdict(list)  # incoming socket -> [ (seq, bytes), ... ]
+    incoming_recv_caches = defaultdict(list)     # incoming socket -> [ Steam2PacketBuffer, ... ]
+    incoming_sending_seq = defaultdict(lambda: 1)  # incoming socket -> last sending seq
     outgoing_socks_map = {}  # outgoing socket -> incoming socket (n -> 1 mapping)
+
     read_socks, write_socks, exp_socks = [], [], []
     listen_sock = socket.socket()
     listen_sock.bind(listen_addr)
@@ -62,6 +71,7 @@ def client():
                     r_sock.close()
                     read_socks.remove(r_sock)
                     continue
+
 
 
 def server():
